@@ -50,15 +50,45 @@ def setup_logging():
     if log_file:
         log_path = Path(log_file)
         
+        # Get parent directory - handle both absolute and relative paths
+        parent_dir = log_path.parent
+        
+        # For relative paths or paths with just filename, parent might be empty
+        if str(parent_dir) == '.' or str(parent_dir) == '':
+            parent_dir = Path.cwd()
+        
+        # Convert to absolute path for checking
+        try:
+            parent_dir = parent_dir.resolve()
+        except Exception:
+            print(f"Error: Invalid log file path: {log_file}", file=sys.stderr)
+            sys.exit(1)
+        
         # Check if parent directory exists
-        if not log_path.parent.exists():
-            print(f"Error: Log file directory does not exist: {log_path.parent}", 
+        if not parent_dir.exists():
+            print(f"Error: Log file directory does not exist: {parent_dir}", 
+                  file=sys.stderr)
+            sys.exit(1)
+        
+        # Check if it's actually a directory
+        if not parent_dir.is_dir():
+            print(f"Error: Log file parent path is not a directory: {parent_dir}", 
                   file=sys.stderr)
             sys.exit(1)
         
         # Check if parent directory is writable
-        if not os.access(log_path.parent, os.W_OK):
-            print(f"Error: Log file directory is not writable: {log_path.parent}", 
+        if not os.access(parent_dir, os.W_OK):
+            print(f"Error: Log file directory is not writable: {parent_dir}", 
+                  file=sys.stderr)
+            sys.exit(1)
+        
+        # Try to create/open the log file to verify we can write to it
+        try:
+            # Test if we can open the file for writing
+            with open(log_file, 'a') as f:
+                pass
+        except (OSError, IOError, PermissionError) as e:
+            print(f"Error: Cannot write to log file {log_file}: {e}", 
                   file=sys.stderr)
             sys.exit(1)
         
