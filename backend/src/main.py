@@ -1,63 +1,352 @@
-from dotenv import load_dotenv
-import logging
-import time
+"""
+ML Model Evaluation System - Main Entry Point
+Evaluates machine learning models from HuggingFace with comprehensive metrics.
+"""
+
 import os
-import csv
+import sys
+import json
+import time
+import logging
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Tuple, Dict
+from typing import Dict, List, Tuple, Optional
+
+# ============================================================================
+# Environment Variable Setup and Validation
+# ============================================================================
+
+def setup_logging():
+    """
+    Setup logging based on LOG_FILE and LOG_LEVEL environment variables.
+    
+    LOG_LEVEL:
+        0 = Silent (only errors)
+        1 = Info messages
+        2 = Debug messages
+    
+    LOG_FILE: Path to log file. If invalid path, exit with error.
+    """
+    log_file = os.getenv('LOG_FILE')
+    log_level_str = os.getenv('LOG_LEVEL', '0')
+    
+    # Parse log level
+    try:
+        log_level = int(log_level_str)
+    except ValueError:
+        log_level = 0
+    
+    # Map log level to logging constants
+    if log_level == 0:
+        level = logging.CRITICAL  # Silent mode
+    elif log_level == 1:
+        level = logging.INFO
+    elif log_level == 2:
+        level = logging.DEBUG
+    else:
+        level = logging.CRITICAL
+    
+    # Validate log file path if provided
+    if log_file:
+        log_path = Path(log_file)
+        
+        # Check if parent directory exists
+        if not log_path.parent.exists():
+            print(f"Error: Log file directory does not exist: {log_path.parent}", 
+                  file=sys.stderr)
+            sys.exit(1)
+        
+        # Check if parent directory is writable
+        if not os.access(log_path.parent, os.W_OK):
+            print(f"Error: Log file directory is not writable: {log_path.parent}", 
+                  file=sys.stderr)
+            sys.exit(1)
+        
+        # Setup file logging
+        logging.basicConfig(
+            level=level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler(sys.stderr)
+            ]
+        )
+    else:
+        # Setup console-only logging
+        logging.basicConfig(
+            level=level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler(sys.stderr)]
+        )
+    
+    return logging.getLogger(__name__)
+
+
+def validate_github_token():
+    """
+    Validate GitHub token if provided.
+    If token is invalid format, print error and exit.
+    """
+    github_token = os.getenv('GITHUB_TOKEN')
+    
+    if github_token:
+        # GitHub tokens have specific prefixes
+        valid_prefixes = ['ghp_', 'github_pat_', 'gho_', 'ghu_', 'ghs_', 'ghr_']
+        
+        if not any(github_token.startswith(prefix) for prefix in valid_prefixes):
+            print("Error: Invalid GitHub token format", file=sys.stderr)
+            sys.exit(1)
+    
+    return github_token
+
+
+def validate_environment():
+    """
+    Validate all environment variables before starting.
+    """
+    # Validate GitHub token
+    validate_github_token()
+    
+    # Setup logging (will exit if LOG_FILE path is invalid)
+    logger = setup_logging()
+    
+    return logger
+
+
+# ============================================================================
+# Import after environment validation setup
+# ============================================================================
+
 from Controllers.Controller import Controller
 from Services.Metric_Model_Service import ModelMetricService
 from lib.Metric_Result import MetricResult
 
-# Load environment variables from .env file
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-# Configure logging to hide all debug info
-logging.basicConfig(level=logging.CRITICAL)
+# ============================================================================
+# Input Parsing
+# ============================================================================
 
-
-def time_evaluation(eval_func: Callable, *args, **kwargs) -> \
-        Tuple[MetricResult, float]:
+def parse_input(file_path: str) -> List[Dict[str, Optional[str]]]:
     """
-    Times a single evaluation function and returns the result and execution
-    time.
+    Parse input file containing URLs.
     
-    Args:
-        eval_func: The evaluation function to time
-        *args: Arguments to pass to the evaluation function
-        **kwargs: Keyword arguments to pass to the evaluation function
+    Format: code_link,dataset_link,model_link
+    Or just: model_link
     
-    Returns:
-        Tuple containing (MetricResult, execution_time_in_seconds)
+    Returns list of dicts with keys: model_link, dataset_link, code_link
     """
-    start_time = time.perf_counter()
+    jobs = []
+    
+    # Resolve relative paths
+    if not os.path.isabs(file_path):
+        project_root = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), '..', '..')
+        )
+        file_path = os.path.join(project_root, file_path)
+    
     try:
-        result = eval_func(*args, **kwargs)
-        end_time = time.perf_counter()
-        execution_time = end_time - start_time
-        return result, execution_time
-    except Exception as e:
-        end_time = time.perf_counter()
-        execution_time = end_time - start_time
-        logging.error(f"Error in evaluation {eval_func.__name__}: {e}")
-        raise
-
-
-def run_evaluations_sequential(model_data) -> \
-        Dict[str, Tuple[MetricResult, float]]:
-    """
-    Run all evaluations sequentially and time each one.
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                
+                # Skip empty lines
+                if not line:
+                    continue
+                
+                # Parse CSV format: code_link,dataset_link,model_link
+                parts = [p.strip() for p in line.split(',')]
+                
+                # Ensure we have at least 3 parts
+                while len(parts) < 3:
+                    parts.insert(0, '')
+                
+                code_link = parts[0] if parts[0] else None
+                dataset_link = parts[1] if parts[1] else None
+                model_link = parts[2] if parts[2] else None
+                
+                # Must have at least a model link
+                if model_link:
+                    jobs.append({
+                        'model_link': model_link,
+                        'dataset_link': dataset_link,
+                        'code_link': code_link
+                    })
     
-    Args:
-        model_data: The model data to evaluate
-        
-    Returns:
-        Dictionary mapping evaluation names to (result, time) tuples
+    except FileNotFoundError:
+        logging.error(f"Input file not found: {file_path}")
+        sys.exit(1)
+    except Exception as e:
+        logging.error(f"Error parsing input file: {e}")
+        sys.exit(1)
+    
+    return jobs
+
+
+# ============================================================================
+# Model Name Extraction
+# ============================================================================
+
+def extract_model_name(model_link: str) -> str:
     """
+    Extract model name from HuggingFace URL.
+    
+    Examples:
+        https://huggingface.co/google-bert/bert-base-uncased -> bert-base-uncased
+        https://huggingface.co/gpt2 -> gpt2
+    """
+    try:
+        if not model_link or not isinstance(model_link, str):
+            return "unknown_model"
+        
+        # Remove query parameters
+        if '?' in model_link:
+            model_link = model_link.split('?')[0]
+        
+        # Remove trailing slashes and /tree/main
+        model_link = model_link.rstrip('/')
+        if '/tree/' in model_link:
+            model_link = model_link.split('/tree/')[0]
+        
+        # Extract model name from URL
+        if 'huggingface.co/' in model_link:
+            parts = model_link.split('/')
+            if len(parts) >= 4:
+                # Return the last part (model name)
+                return parts[-1]
+        
+        return "unknown_model"
+    except Exception:
+        return "unknown_model"
+
+
+# ============================================================================
+# Link Discovery
+# ============================================================================
+
+def find_missing_links(model_link: str, dataset_link: Optional[str], 
+                       code_link: Optional[str]) -> Tuple[List[str], Optional[str]]:
+    """
+    Discover missing dataset and code links from model card.
+    Returns: (dataset_links, code_link)
+    """
+    import re
+    from lib.HuggingFace_API_Manager import HuggingFaceAPIManager
+    
+    dataset_links = []
+    discovered_code = None
+    
+    # Add provided links
+    if dataset_link:
+        dataset_links.append(dataset_link)
+    
+    if code_link:
+        discovered_code = code_link
+    
+    # Try to discover from model card
+    try:
+        hf_manager = HuggingFaceAPIManager()
+        model_id = hf_manager.model_link_to_id(model_link)
+        model_info = hf_manager.get_model_info(model_id)
+        
+        if model_info:
+            # Search in card data
+            if hasattr(model_info, 'cardData') and model_info.cardData:
+                card_text = str(model_info.cardData)
+                
+                # Find dataset links
+                dataset_patterns = [
+                    r'https://huggingface\.co/datasets/([^\s\)]+)',
+                    r'datasets/([^\s\)]+)',
+                ]
+                
+                for pattern in dataset_patterns:
+                    matches = re.findall(pattern, card_text, re.IGNORECASE)
+                    for match in matches:
+                        if match.startswith('http'):
+                            dataset_url = match
+                        else:
+                            dataset_url = f"https://huggingface.co/datasets/{match}"
+                        
+                        if dataset_url not in dataset_links:
+                            dataset_links.append(dataset_url)
+                
+                # Find code links (GitHub)
+                if not discovered_code:
+                    code_patterns = [
+                        r'https://github\.com/([^\s\)]+)',
+                        r'github\.com/([^\s\)]+)',
+                        r'repo:\s*([^\s]+)',
+                        r'code:\s*([^\s]+)',
+                    ]
+                    
+                    for pattern in code_patterns:
+                        matches = re.findall(pattern, card_text, re.IGNORECASE)
+                        if matches:
+                            match = matches[0]
+                            if match.startswith('http'):
+                                discovered_code = match
+                            else:
+                                discovered_code = f"https://github.com/{match}"
+                            break
+            
+            # Check tags for dataset info
+            if hasattr(model_info, 'tags') and model_info.tags:
+                for tag in model_info.tags:
+                    if tag.startswith('dataset:'):
+                        dataset_name = tag.replace('dataset:', '')
+                        dataset_url = f"https://huggingface.co/datasets/{dataset_name}"
+                        if dataset_url not in dataset_links:
+                            dataset_links.append(dataset_url)
+            
+            # Check modelId for potential GitHub repo
+            if not discovered_code and hasattr(model_info, 'modelId') and model_info.modelId:
+                # Many models follow pattern: org/model-name -> github.com/org/model-name
+                if '/' in model_info.modelId:
+                    potential_repo = f"https://github.com/{model_info.modelId}"
+                    discovered_code = potential_repo
+        
+        # Log discoveries
+        if len(dataset_links) > 3:
+            logging.info(f"Discovered {len(dataset_links)} datasets: "
+                        f"{', '.join(dataset_links[:3])}, ...")
+        elif dataset_links:
+            logging.info(f"Discovered datasets: {', '.join(dataset_links)}")
+        
+        if discovered_code:
+            logging.info(f"Discovered code repository: {discovered_code}")
+    
+    except Exception as e:
+        logging.warning(f"Could not discover additional links: {e}")
+    
+    return dataset_links, discovered_code
+
+
+# ============================================================================
+# Evaluation Timing
+# ============================================================================
+
+def time_evaluation(eval_func, *args, **kwargs) -> Tuple[MetricResult, float]:
+    """
+    Time the execution of an evaluation function.
+    Returns: (result, execution_time_seconds)
+    """
+    start_time = time.time()
+    result = eval_func(*args, **kwargs)
+    end_time = time.time()
+    execution_time = end_time - start_time
+    
+    return result, execution_time
+
+
+# ============================================================================
+# Evaluation Runners
+# ============================================================================
+
+def run_evaluations_sequential(model_data) -> Dict[str, Tuple[MetricResult, float]]:
+    """Run all evaluations sequentially."""
     service = ModelMetricService()
     results = {}
     
-    # Define all evaluations
     evaluations = [
         ("Performance Claims", service.EvaluatePerformanceClaims),
         ("Bus Factor", service.EvaluateBusFactor),
@@ -66,38 +355,21 @@ def run_evaluations_sequential(model_data) -> \
         ("Availability", service.EvaluateDatasetAndCodeAvailabilityScore),
         ("Code Quality", service.EvaluateCodeQuality),
         ("Dataset Quality", service.EvaluateDatasetsQuality),
-        ("License", service.EvaluateLicense)
+        ("License", service.EvaluateLicense),
     ]
     
-    logging.info("Running evaluations sequentially...")
-    logging.info("-" * 50)
-    
     for name, eval_func in evaluations:
-        logging.info(f"Starting: {name}")
         result, exec_time = time_evaluation(eval_func, model_data)
         results[name] = (result, exec_time)
-        logging.info(f"Completed: {name} - Score: {result.value:.3f} - "
-                     f"Time: {exec_time:.3f}s")
     
     return results
 
 
-def run_evaluations_parallel(model_data, max_workers: int = 4) -> \
-        Dict[str, Tuple[MetricResult, float]]:
-    """
-    Run all evaluations in parallel using ThreadPoolExecutor and time each one.
-    
-    Args:
-        model_data: The model data to evaluate
-        max_workers: Maximum number of worker threads (default: 4)
-        
-    Returns:
-        Dictionary mapping evaluation names to (result, time) tuples
-    """
+def run_evaluations_parallel(model_data, max_workers: int = 4) -> Dict[str, Tuple[MetricResult, float]]:
+    """Run evaluations in parallel for better performance."""
     service = ModelMetricService()
     results = {}
     
-    # Define all evaluations
     evaluations = [
         ("Performance Claims", service.EvaluatePerformanceClaims),
         ("Bus Factor", service.EvaluateBusFactor),
@@ -106,355 +378,267 @@ def run_evaluations_parallel(model_data, max_workers: int = 4) -> \
         ("Availability", service.EvaluateDatasetAndCodeAvailabilityScore),
         ("Code Quality", service.EvaluateCodeQuality),
         ("Dataset Quality", service.EvaluateDatasetsQuality),
-        ("License", service.EvaluateLicense)
+        ("License", service.EvaluateLicense),
     ]
     
-    logging.info(f"Running evaluations in parallel "
-                 f"(max_workers={max_workers})...")
-    logging.info("-" * 50)
-    
-    # Submit all tasks to the thread pool
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all evaluations
-        future_to_name = {}
-        for name, eval_func in evaluations:
-            future = executor.submit(time_evaluation, eval_func, model_data)
-            future_to_name[future] = name
-            logging.info(f"Submitted: {name}")
+        future_to_name = {
+            executor.submit(time_evaluation, eval_func, model_data): name
+            for name, eval_func in evaluations
+        }
         
-        # Collect results as they complete
         for future in as_completed(future_to_name):
             name = future_to_name[future]
             try:
                 result, exec_time = future.result()
                 results[name] = (result, exec_time)
-                logging.info(f"Completed: {name} - "
-                             f"Score: {result.value:.3f} - "
-                             f"Time: {exec_time:.3f}s")
             except Exception as e:
-                logging.error(f"Failed: {name} - Error: {e}")
-                # You might want to store the error in results or handle
-                # it differently
-                
+                logging.error(f"Evaluation '{name}' failed: {e}")
+    
     return results
 
 
-def print_timing_summary(results: Dict[str, Tuple[MetricResult, float]],
-                         total_time: float):
+# ============================================================================
+# Score Calculation
+# ============================================================================
+
+def calculate_net_score(results: Dict[str, Tuple[MetricResult, float]]) -> float:
     """
-    Print a summary of all evaluation results and timing information.
+    Calculate net score as weighted average of all metrics.
     
-    Args:
-        results: Dictionary mapping evaluation names to (result, time) tuples
-        total_time: Total execution time for all evaluations
+    Weights based on Sarah's priorities from Phase 1 spec.
     """
-    logging.info("\n" + "=" * 60)
-    logging.info("EVALUATION SUMMARY")
-    logging.info("=" * 60)
+    weights = {
+        "License": 0.20,
+        "Ramp-Up Time": 0.15,
+        "Bus Factor": 0.15,
+        "Performance Claims": 0.15,
+        "Size": 0.10,
+        "Availability": 0.10,
+        "Dataset Quality": 0.075,
+        "Code Quality": 0.075
+    }
     
-    total_eval_time = 0.0
-    for name, (result, exec_time) in results.items():
-        logging.info(f"{name:<20}: Score = {result.value:.3f}, "
-                     f"Time = {exec_time:.3f}s")
-        total_eval_time += exec_time
+    weighted_sum = 0.0
+    total_weight = 0.0
     
-    logging.info("-" * 60)
-    logging.info(f"{'Total Eval Time':<20}: {total_eval_time:.3f}s")
-    logging.info(f"{'Wall Clock Time':<20}: {total_time:.3f}s")
+    for name, (result, _) in results.items():
+        if name in weights and result and hasattr(result, 'value'):
+            value = max(0.0, min(1.0, float(result.value)))
+            weighted_sum += value * weights[name]
+            total_weight += weights[name]
     
-    if total_time > 0:
-        efficiency = (total_eval_time / total_time) * 100
-        logging.info(f"{'Parallelism Efficiency':<20}: {efficiency:.1f}%")
-    
-    logging.info("=" * 60)
+    return weighted_sum / total_weight if total_weight > 0 else 0.0
 
 
-def parse_input(file_path):
-    """
-    Parse input file with lines like:
-    [code_link], [dataset_link], model_link
-    Returns a list of dicts with keys: dataset_link, code_link, model_link
-    """
-    jobs = []
-    # If the file path is relative, resolve it relative to the project root
-    if not os.path.isabs(file_path):
-        # Get the project root directory (two levels up from this file)
-        project_root = os.path.join(os.path.dirname(__file__), '..', '..')
-        file_path = os.path.join(project_root, file_path)
-        file_path = os.path.normpath(file_path)
-    
-    with open(file_path, encoding='utf-8') as f:
-        for row in csv.reader(f):
-            # Remove whitespace and ignore empty fields
-            row = [x.strip() for x in row if x.strip()]
-            if not row:
-                continue
-            # Always take the last field as model_link
-            model_link = row[-1]
-            code_link = row[0] if len(row) > 1 else None
-            dataset_link = row[1] if len(row) > 2 else None
-            jobs.append({
-                'model_link': model_link,
-                'dataset_link': dataset_link,
-                'code_link': code_link
-            })
-    return jobs
+# ============================================================================
+# Output Formatting
+# ============================================================================
 
-
-def find_missing_links(model_link, dataset_link, code_link):
-    """
-    If dataset_link or code_link is missing, try to find them from the
-    model card. Uses HuggingFace API to get model info and parse for links.
-    """
-    from lib.HuggingFace_API_Manager import HuggingFaceAPIManager
-    import re
-    
-    discovered_datasets = []
-    discovered_code = None
-    
-    try:
-        # Initialize HuggingFace API manager
-        hf_manager = HuggingFaceAPIManager()
-        
-        # Extract model ID from the link
-        model_id = hf_manager.model_link_to_id(model_link)
-        logging.info(f"  Searching for links in model: {model_id}")
-        
-        # Get model information
-        model_info = hf_manager.get_model_info(model_id)
-        
-        # Check model card text for links
-        if hasattr(model_info, 'cardData') and model_info.cardData:
-            card_text = str(model_info.cardData)
-            
-            # Look for dataset links in model card
-            dataset_patterns = [
-                r'https://huggingface\.co/datasets/([^/\s]+/[^/\s]+)',
-                r'huggingface\.co/datasets/([^/\s]+/[^/\s]+)',
-                r'datasets/([^/\s\)]+/[^/\s\)]+)',
-            ]
-            
-            for pattern in dataset_patterns:
-                matches = re.findall(pattern, card_text, re.IGNORECASE)
-                for match in matches:
-                    if not match.startswith('http'):
-                        dataset_url = (f"https://huggingface.co/datasets/"
-                                       f"{match}")
-                    else:
-                        dataset_url = match
-                    if dataset_url not in discovered_datasets:
-                        discovered_datasets.append(dataset_url)
-            
-            # Look for GitHub/code repository links
-            code_patterns = [
-                r'https://github\.com/([^/\s\)]+/[^/\s\)]+)',
-                r'github\.com/([^/\s\)]+/[^/\s\)]+)',
-                r'\[.*?\]\(https://github\.com/([^/\s\)]+/[^/\s\)]+)\)',
-                r'repo:\s*([^/\s]+/[^/\s]+)',
-                r'code:\s*https://github\.com/([^/\s\)]+/[^/\s\)]+)',
-            ]
-            
-            for pattern in code_patterns:
-                matches = re.findall(pattern, card_text, re.IGNORECASE)
-                if matches and not discovered_code:
-                    match = matches[0]  # Take the first one
-                    # Clean up the match (remove trailing punctuation)
-                    match = match.rstrip('.,;)')
-                    if not match.startswith('http'):
-                        discovered_code = f"https://github.com/{match}"
-                    else:
-                        discovered_code = match
-                    break
-        
-        # Also check model tags and metadata
-        if hasattr(model_info, 'tags') and model_info.tags:
-            for tag in model_info.tags:
-                if 'dataset:' in tag:
-                    dataset_name = tag.replace('dataset:', '').strip()
-                    if '/' in dataset_name:
-                        dataset_url = (f"https://huggingface.co/datasets/"
-                                       f"{dataset_name}")
-                        if dataset_url not in discovered_datasets:
-                            discovered_datasets.append(dataset_url)
-        
-        # Check model info for repository URL
-        if hasattr(model_info, 'modelId') and not discovered_code:
-            # Try to find associated GitHub repo through common naming
-            model_id_parts = model_info.modelId.split('/')
-            if len(model_id_parts) == 2:
-                org, model_name = model_id_parts
-                # Try common GitHub URL patterns
-                # Remove size/version suffixes (e.g., -medium, -large, -32B)
-                pattern = r'-(?:small|medium|large|xl|xxl|\d+[BMG]?)$'
-                base_name = re.sub(pattern, '', model_name,
-                                   flags=re.IGNORECASE)
-                
-                potential_repos = [
-                    f"https://github.com/{org}/{base_name}",
-                    f"https://github.com/{org}/{model_name}",
-                    f"https://github.com/{org}/{model_name.lower()}",
-                    f"https://github.com/{org.lower()}/{base_name}",
-                ]
-                # We'll check if these exist later, for now just take first
-                discovered_code = potential_repos[0]
-        
-    except Exception as e:
-        logging.warning(f"Could not fetch model info for {model_link}: {e}")
-    
-    # Use provided links first, fall back to discovered links
-    final_dataset_links = []
-    if dataset_link and dataset_link.strip():
-        final_dataset_links.append(dataset_link.strip())
-    final_dataset_links.extend(discovered_datasets)
-    
-    final_code_link = code_link
-    if not final_code_link or not final_code_link.strip():
-        final_code_link = discovered_code
-    
-    # Report what we found
-    if discovered_datasets:
-        dataset_preview = ', '.join(discovered_datasets[:3])
-        more_text = '...' if len(discovered_datasets) > 3 else ''
-        logging.info(f"  Found {len(discovered_datasets)} dataset link(s): "
-                     f"{dataset_preview}{more_text}")
-    if discovered_code:
-        logging.info(f"  Found code repository: {discovered_code}")
-    
-    return final_dataset_links, final_code_link
-
-
-def extract_model_name(model_link):
-    """Extract model name from HuggingFace model link."""
-    import re
-    match = re.search(r'huggingface\.co/([^/]+/[^/?]+)', model_link)
-    if match:
-        return match.group(1).split('/')[-1]
-    return "unknown_model"
-
-
-def format_size_score(size_result):
-    """Convert size score to platform-specific format."""
-    # For now, create a simple mapping based on the size score
-    # This might need adjustment based on actual size evaluation logic
-    base_score = size_result.value
+def format_size_score(result: MetricResult) -> Dict[str, float]:
+    """Format size score as dict with hardware targets."""
+    if result and hasattr(result, 'value'):
+        size_value = max(0.0, min(1.0, float(result.value)))
+        return {
+            "raspberry_pi": round(size_value * 0.2, 2),
+            "jetson_nano": round(size_value * 0.4, 2),
+            "desktop_pc": round(size_value * 0.8, 2),
+            "aws_server": round(size_value, 2)
+        }
     return {
-        "raspberry_pi": round(min(base_score * 0.2, 1.0), 2),
-        "jetson_nano": round(min(base_score * 0.4, 1.0), 2),
-        "desktop_pc": round(min(base_score * 0.8, 1.0), 2),
-        "aws_server": round(base_score, 2)
+        "raspberry_pi": 0.0,
+        "jetson_nano": 0.0,
+        "desktop_pc": 0.0,
+        "aws_server": 0.0
     }
 
 
-def run_batch_evaluation(input_file):
-    jobs = parse_input(input_file)
-    for i, job in enumerate(jobs, 1):
+def handle_missing_model_data(model_link: str) -> str:
+    """Generate output for a model that failed to fetch."""
+    model_name = extract_model_name(model_link)
+    
+    output = {
+        "name": model_name,
+        "category": "MODEL",
+        "net_score": 0.0,
+        "net_score_latency": 1,
+        "ramp_up_time": 0.0,
+        "ramp_up_time_latency": 1,
+        "bus_factor": 0.0,
+        "bus_factor_latency": 1,
+        "performance_claims": 0.0,
+        "performance_claims_latency": 1,
+        "license": 0.0,
+        "license_latency": 1,
+        "size_score": {
+            "raspberry_pi": 0.0,
+            "jetson_nano": 0.0,
+            "desktop_pc": 0.0,
+            "aws_server": 0.0
+        },
+        "size_score_latency": 1,
+        "dataset_and_code_score": 0.0,
+        "dataset_and_code_score_latency": 1,
+        "dataset_quality": 0.0,
+        "dataset_quality_latency": 1,
+        "code_quality": 0.0,
+        "code_quality_latency": 1
+    }
+    
+    return json.dumps(output)
+
+
+# ============================================================================
+# Timing Summary
+# ============================================================================
+
+def print_timing_summary(results: Dict[str, Tuple[MetricResult, float]], 
+                        total_time: float):
+    """Print timing summary for all evaluations."""
+    logging.info("=" * 60)
+    logging.info("EVALUATION TIMING SUMMARY")
+    logging.info("=" * 60)
+    
+    for name, (result, exec_time) in results.items():
+        logging.info(f"{name:30s}: {exec_time:6.3f}s (score: {result.value:.2f})")
+    
+    logging.info("-" * 60)
+    logging.info(f"{'Total Time':30s}: {total_time:6.3f}s")
+    logging.info("=" * 60)
+
+
+# ============================================================================
+# Batch Evaluation
+# ============================================================================
+
+def run_batch_evaluation(input_file_path: str):
+    """Run batch evaluation on URLs from input file."""
+    # Validate environment FIRST
+    logger = validate_environment()
+    
+    # Parse input file
+    jobs = parse_input(input_file_path)
+    
+    if not jobs:
+        logger.error("No valid URLs found in input file")
+        sys.exit(1)
+    
+    logger.info(f"Processing {len(jobs)} model(s)")
+    
+    # Initialize controller
+    controller = Controller()
+    
+    # Process each job
+    for job in jobs:
         model_link = job['model_link']
+        dataset_links = [job['dataset_link']] if job['dataset_link'] else []
+        code_link = job['code_link']
         
+        # Find any missing links
         dataset_links, code_link = find_missing_links(
-            model_link, job.get('dataset_link'), job.get('code_link'))
-        
-        fetcher = Controller()
-        model_data = fetcher.fetch(
-            model_link,
-            dataset_links=dataset_links if dataset_links else [],
-            code_link=code_link
+            model_link, 
+            dataset_links[0] if dataset_links else None,
+            code_link
         )
         
-        start_time = time.perf_counter()
-        results = run_evaluations_parallel(model_data, max_workers=4)
-        end_time = time.perf_counter()
-        total_time = end_time - start_time
-        
-        # Extract model name
-        model_name = extract_model_name(model_link)
-        
-        # Store metric scores for net score calculation
-        metric_scores = {}
-        
-        # Add each metric with proper naming and latency
-        metric_mapping = {
-            "Ramp-Up Time": ("ramp_up_time", "ramp_up_time_latency"),
-            "Bus Factor": ("bus_factor", "bus_factor_latency"),
-            "Performance Claims": ("performance_claims",
-                                   "performance_claims_latency"),
-            "License": ("license", "license_latency"),
-            "Size": ("size_score", "size_score_latency"),
-            "Availability": ("dataset_and_code_score",
-                             "dataset_and_code_score_latency"),
-            "Dataset Quality": ("dataset_quality", "dataset_quality_latency"),
-            "Code Quality": ("code_quality", "code_quality_latency")
-        }
-        
-        # Collect all metric data first
-        metric_data = {}
-        for metric_name, (result, exec_time) in results.items():
-            if metric_name in metric_mapping:
-                if metric_name == "Size":
-                    # Special handling for size score
-                    size_scores = format_size_score(result)
-                    metric_data[metric_name] = (size_scores, exec_time)
-                    # Calculate mean of all platform scores for net score
-                    size_mean = sum(size_scores.values()) / len(size_scores)
-                    metric_scores["Size"] = size_mean
+        try:
+            # Fetch model data
+            logger.info(f"Fetching data for: {model_link}")
+            model_data = controller.fetch(model_link, dataset_links, code_link)
+            
+            if not model_data:
+                logger.warning(f"Failed to fetch data for {model_link}")
+                print(handle_missing_model_data(model_link))
+                continue
+            
+            # Run evaluations in parallel
+            logger.info("Running evaluations...")
+            start_time = time.time()
+            results = run_evaluations_parallel(model_data)
+            total_time = time.time() - start_time
+            
+            # Print timing summary to log
+            print_timing_summary(results, total_time)
+            
+            # Extract model name
+            model_name = extract_model_name(model_link)
+            
+            # Calculate net score
+            net_score = calculate_net_score(results)
+            total_latency = sum(t * 1000 for _, (_, t) in results.items())
+            
+            # Build output dict
+            output = {
+                "name": model_name,
+                "category": "MODEL",
+                "net_score": round(max(0.0, min(1.0, net_score)), 2),
+                "net_score_latency": max(1, int(round(total_latency)))
+            }
+            
+            # Add all metrics
+            field_mapping = [
+                ("Ramp-Up Time", "ramp_up_time"),
+                ("Bus Factor", "bus_factor"),
+                ("Performance Claims", "performance_claims"),
+                ("License", "license"),
+                ("Size", "size_score"),
+                ("Availability", "dataset_and_code_score"),
+                ("Dataset Quality", "dataset_quality"),
+                ("Code Quality", "code_quality")
+            ]
+            
+            for name, field_name in field_mapping:
+                if name in results:
+                    result, exec_time = results[name]
+                    
+                    if field_name == "size_score":
+                        output["size_score"] = format_size_score(result)
+                    else:
+                        value = result.value if hasattr(result, 'value') else 0.0
+                        output[field_name] = round(max(0.0, min(1.0, value)), 2)
+                    
+                    output[f"{field_name}_latency"] = max(1, int(round(exec_time * 1000)))
                 else:
-                    score_value = round(result.value, 2)
-                    metric_data[metric_name] = (score_value, exec_time)
-                    metric_scores[metric_name] = score_value
-        
-        # Calculate net score using the specified weights
-        # NetScore = 0.20RampUp + 0.15BusFactor + 0.15PerfClaim + 0.15License +
-        #           0.10Size + 0.10CodeDatasetAvailability + 0.10DatasetQual +
-        #           0.05CodeQual
-        weights = {
-            "Ramp-Up Time": 0.20,
-            "Bus Factor": 0.15,
-            "Performance Claims": 0.15,
-            "License": 0.15,
-            "Size": 0.10,
-            "Availability": 0.10,
-            "Dataset Quality": 0.10,
-            "Code Quality": 0.05
-        }
-        
-        net_score = 0.0
-        for metric_name, weight in weights.items():
-            if metric_name in metric_scores:
-                net_score += weights[metric_name] * metric_scores[metric_name]
-        
-        # Build output JSON in the exact order as sample_output.txt
-        from collections import OrderedDict
-        output = OrderedDict([
-            ("name", model_name),
-            ("category", "MODEL"),
-            ("net_score", round(net_score, 2)),
-            ("net_score_latency", int(total_time * 1000)),
-        ])
-        
-        # Add metrics in the exact order from sample output
-        ordered_metrics = [
-            "Ramp-Up Time", "Bus Factor", "Performance Claims", "License",
-            "Size", "Availability", "Dataset Quality", "Code Quality"
-        ]
-        
-        for metric_name in ordered_metrics:
-            if metric_name in metric_data:
-                score_key, latency_key = metric_mapping[metric_name]
-                score_value, exec_time = metric_data[metric_name]
-                
-                output[score_key] = score_value
-                output[latency_key] = int(exec_time * 1000)
-        
-        # Output JSON to stdout
-        import json
-        json_output = json.dumps(output, separators=(',', ':'),
-                                 ensure_ascii=False)
-        print(json_output.strip())
+                    # Missing metric, use defaults
+                    if field_name == "size_score":
+                        output["size_score"] = {
+                            "raspberry_pi": 0.0,
+                            "jetson_nano": 0.0,
+                            "desktop_pc": 0.0,
+                            "aws_server": 0.0
+                        }
+                    else:
+                        output[field_name] = 0.0
+                    output[f"{field_name}_latency"] = 1
+            
+            # Print JSON to stdout (autograder reads this)
+            print(json.dumps(output))
+            
+        except Exception as e:
+            logger.error(f"Error processing {model_link}: {e}", exc_info=True)
+            print(handle_missing_model_data(model_link))
 
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1].endswith('.txt'):
-        run_batch_evaluation(sys.argv[1])
-    else:
-        # error: please provide a .txt file with model links
-        logging.error("Usage: python main.py sample_input.txt")
+    if len(sys.argv) < 2:
+        print("Usage: python main.py <url_file>", file=sys.stderr)
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    
+    # Resolve relative paths
+    if not os.path.isabs(input_file):
+        project_root = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), '..', '..')
+        )
+        input_file = os.path.join(project_root, input_file)
+    
+    if not os.path.exists(input_file):
+        print(f"Error: Input file not found: {input_file}", file=sys.stderr)
+        sys.exit(1)
+    
+    run_batch_evaluation(input_file)
