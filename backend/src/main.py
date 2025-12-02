@@ -50,19 +50,18 @@ def setup_logging():
     if log_file:
         log_path = Path(log_file)
         
-        # Get parent directory - handle both absolute and relative paths
-        parent_dir = log_path.parent
-        
-        # For relative paths or paths with just filename, parent might be empty
-        if str(parent_dir) == '.' or str(parent_dir) == '':
-            parent_dir = Path.cwd()
-        
-        # Convert to absolute path for checking
+        # Try to resolve to absolute path
         try:
-            parent_dir = parent_dir.resolve()
-        except Exception:
-            print(f"Error: Invalid log file path: {log_file}", file=sys.stderr)
+            if not log_path.is_absolute():
+                # For relative paths, make absolute from current directory
+                log_path = Path.cwd() / log_path
+            log_path = log_path.resolve(strict=False)
+        except Exception as e:
+            print(f"Error: Invalid log file path: {log_file} - {e}", file=sys.stderr)
             sys.exit(1)
+        
+        # Get parent directory
+        parent_dir = log_path.parent
         
         # Check if parent directory exists
         if not parent_dir.exists():
@@ -85,10 +84,10 @@ def setup_logging():
         # Try to create/open the log file to verify we can write to it
         try:
             # Test if we can open the file for writing
-            with open(log_file, 'a') as f:
+            with open(log_path, 'a') as f:
                 pass
         except (OSError, IOError, PermissionError) as e:
-            print(f"Error: Cannot write to log file {log_file}: {e}", 
+            print(f"Error: Cannot write to log file {log_path}: {e}", 
                   file=sys.stderr)
             sys.exit(1)
         
@@ -97,7 +96,7 @@ def setup_logging():
             level=level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_file),
+                logging.FileHandler(str(log_path)),
                 logging.StreamHandler(sys.stderr)
             ]
         )

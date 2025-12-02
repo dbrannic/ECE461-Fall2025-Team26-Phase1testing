@@ -50,7 +50,6 @@ install_dependencies() {
 
 # Function to run tests
 run_tests() {
-    # Suppress all messages except the required output line
     # Check if Python is available
     PYTHON_CMD=""
     if command -v py &> /dev/null; then
@@ -70,68 +69,46 @@ run_tests() {
         exit 1
     fi
     
-    # Run pytest with coverage, capturing all output
-    test_output=$($PYTHON_CMD -m pytest backend/src/Testing/ \
+    # Run pytest with coverage to a temporary file
+    temp_output=$(mktemp)
+    $PYTHON_CMD -m pytest backend/src/Testing/ \
         --cov=backend/src \
-        --cov-report=term \
-        --cov-fail-under=0 \
-        -v 2>&1)
+        --cov-report=term-missing \
+        --tb=short \
+        -q 2>&1 | tee "$temp_output" >&2
     
-    test_exit_code=$?
+    test_exit_code=${PIPESTATUS[0]}
     
-    # Parse test results - look for the summary line
+    # Parse test results
     passed_tests=0
     total_tests=0
-    failed_tests=0
     
-    # Try to find summary line like: "= 187 passed in 2.34s ="
-    if echo "$test_output" | grep -E "=.*passed.*=" > /dev/null; then
-        summary_line=$(echo "$test_output" | grep -E "=.*passed.*=" | tail -1)
-        
-        # Extract passed count
-        if echo "$summary_line" | grep -o "[0-9]\+ passed" > /dev/null; then
-            passed_tests=$(echo "$summary_line" | grep -o "[0-9]\+ passed" | grep -o "[0-9]\+" | head -1)
-        fi
-        
-        # Extract failed count if present
-        if echo "$summary_line" | grep -o "[0-9]\+ failed" > /dev/null; then
-            failed_tests=$(echo "$summary_line" | grep -o "[0-9]\+ failed" | grep -o "[0-9]\+" | head -1)
-        fi
-        
-        total_tests=$((passed_tests + failed_tests))
+    # Look for pytest summary line like "187 passed in 2.34s"
+    if grep -E "[0-9]+ passed" "$temp_output" > /dev/null; then
+        passed_tests=$(grep -oE "[0-9]+ passed" "$temp_output" | grep -oE "[0-9]+" | head -1)
     fi
     
-    # Fallback: count individual test results
-    if [ $total_tests -eq 0 ]; then
-        passed_tests=$(echo "$test_output" | grep -c "PASSED" || echo 0)
-        failed_tests=$(echo "$test_output" | grep -c "FAILED" || echo 0)
+    if grep -E "[0-9]+ failed" "$temp_output" > /dev/null; then
+        failed_tests=$(grep -oE "[0-9]+ failed" "$temp_output" | grep -oE "[0-9]+" | head -1)
         total_tests=$((passed_tests + failed_tests))
-        
-        # If still zero, use known total
-        if [ $total_tests -eq 0 ]; then
-            total_tests=187
-            passed_tests=187
-        fi
+    else
+        total_tests=$passed_tests
     fi
     
-    # Extract coverage percentage - look for line with "TOTAL"
+    # Extract coverage percentage from the TOTAL line
     coverage_percentage=0
-    if echo "$test_output" | grep "TOTAL" > /dev/null; then
-        coverage_line=$(echo "$test_output" | grep "TOTAL" | tail -1)
-        # Extract percentage (format: "TOTAL    1234    567    54%")
-        if echo "$coverage_line" | grep -o "[0-9]\+%" > /dev/null; then
-            coverage_percentage=$(echo "$coverage_line" | grep -o "[0-9]\+%" | grep -o "[0-9]\+" | tail -1)
-        fi
+    if grep "TOTAL" "$temp_output" > /dev/null; then
+        coverage_percentage=$(grep "TOTAL" "$temp_output" | grep -oE "[0-9]+%" | grep -oE "[0-9]+" | tail -1)
     fi
     
-    # CRITICAL: Output in EXACT format expected by autograder
-    # Format: "X/Y test cases passed. Z% line coverage achieved."
+    # Clean up temp file
+    rm -f "$temp_output"
+    
+    # Output MUST be exactly this format (to stdout, not stderr)
     echo "${passed_tests}/${total_tests} test cases passed. ${coverage_percentage}% line coverage achieved."
     
-    # Exit with success if we have reasonable results
-    if [ $passed_tests -ge 20 ] && [ $coverage_percentage -ge 80 ]; then
-        exit 0
-    elif [ $passed_tests -gt 0 ]; then
+    # Exit with appropriate code
+    if [ $test_exit_code -eq 0 ]; then
         exit 0
     else
         exit 1
