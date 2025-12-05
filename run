@@ -69,83 +69,63 @@ run_tests() {
         exit 1
     fi
     
-    # Run pytest and capture ALL output (stdout+stderr)
+    # Run pytest and capture ALL output
     pytest_output=$($PYTHON_CMD -m pytest backend/src/Testing/ \
         --cov=backend/src \
         --cov-report=term \
         --tb=line \
-        -q 2>&1)
-
+        -v 2>&1)
+    
     # Store exit code
     test_exit_code=$?
-
-    # Print pytest output to stderr for debugging (autograder reads only stdout)
+    
+    # Print pytest output to stderr (for human debugging)
     echo "$pytest_output" >&2
-
+    
     # === PARSE TEST COUNTS ===
     passed=0
     failed=0
-    errors=0
-    total=0
-
-    # Prefer the concise summary patterns
+    
+    # Look for: "187 passed in 2.34s"
     if echo "$pytest_output" | grep -qE "[0-9]+ passed"; then
-        passed=$(echo "$pytest_output" | grep -oE "[0-9]+ passed" | tail -1 | grep -oE "[0-9]+")
+        passed=$(echo "$pytest_output" | grep -oE "[0-9]+ passed" | head -1 | grep -oE "[0-9]+")
     fi
+    
     if echo "$pytest_output" | grep -qE "[0-9]+ failed"; then
-        failed=$(echo "$pytest_output" | grep -oE "[0-9]+ failed" | tail -1 | grep -oE "[0-9]+")
+        failed=$(echo "$pytest_output" | grep -oE "[0-9]+ failed" | head -1 | grep -oE "[0-9]+")
     fi
-    if echo "$pytest_output" | grep -qE "[0-9]+ error"; then
-        errors=$(echo "$pytest_output" | grep -oE "[0-9]+ error" | tail -1 | grep -oE "[0-9]+")
+    
+    total=$((passed + failed))
+    
+    # Fallback: count PASSED/FAILED markers
+    if [ $total -eq 0 ]; then
+        passed=$(echo "$pytest_output" | grep -c "PASSED" || echo "0")
+        failed=$(echo "$pytest_output" | grep -c "FAILED" || echo "0")
+        total=$((passed + failed))
     fi
-
-    # Try to pick up the 'collected N items' line if present
-    if echo "$pytest_output" | grep -qE "collected [0-9]+"; then
-        collected=$(echo "$pytest_output" | grep -oE "collected [0-9]+" | tail -1 | grep -oE "[0-9]+")
-        # If we didn't get per-result numbers, assume collected == total
-        if [ -z "$passed" ] || [ "$passed" -eq 0 ]; then
-            passed=${passed:-0}
-        fi
-        total=$((collected))
-    fi
-
-    # Compute total from parsed numbers if not set by collected
-    if [ -z "$total" ] || [ "$total" -eq 0 ]; then
-        passed=${passed:-0}
-        failed=${failed:-0}
-        errors=${errors:-0}
-        total=$((passed + failed + errors))
-    else
-        # we have a collected count; if passed is missing, derive it
-        if [ "$passed" -eq 0 ] && [ $total -gt 0 ]; then
-            passed=$((total - failed - errors))
-        fi
-    fi
-
-    # Final safety defaults
-    passed=${passed:-0}
-    total=${total:-0}
-
+    
     # === PARSE COVERAGE ===
     coverage=0
-    # Look for lines with a percent value (prefer the last % in output)
-    cov_candidate=$(echo "$pytest_output" | grep -oE "[0-9]+%" | tail -1 | tr -d '%') || true
-    if [ -n "$cov_candidate" ]; then
-        coverage=$cov_candidate
+    
+    # Look for TOTAL line: "TOTAL      1234    567    46%"
+    if echo "$pytest_output" | grep -q "^TOTAL"; then
+        coverage=$(echo "$pytest_output" | grep "^TOTAL" | grep -oE "[0-9]+%" | tail -1 | tr -d '%')
     fi
-
+    
+    # Fallback: try with flexible whitespace
+    if [ -z "$coverage" ] || [ "$coverage" -eq 0 ]; then
+        coverage=$(echo "$pytest_output" | grep "TOTAL" | grep -oE "[0-9]+%\s*$" | grep -oE "[0-9]+" | head -1)
+    fi
+    
+    # Ensure valid defaults
+    passed=${passed:-0}
+    total=${total:-0}
     coverage=${coverage:-0}
-
-    # Ensure numeric defaults
-    if [ -z "$passed" ]; then passed=0; fi
-    if [ -z "$total" ]; then total=0; fi
-    if [ -z "$coverage" ]; then coverage=0; fi
-
+    
     # === CRITICAL: OUTPUT TO STDOUT IN EXACT FORMAT ===
-    # The autograder parses this single stdout line
     echo "${passed}/${total} test cases passed. ${coverage}% line coverage achieved."
-
-    # Exit with pytest's exit code so CI/test harness can see failures
+    
+    # Exit with pytest's exit code
     exit $test_exit_code
 }
 
@@ -218,14 +198,3 @@ main() {
 
 # Run main function
 main "$@"
-```
-
-**To use this:**
-
-1. Save this entire script to a file named `run` (no extension) in your project root
-2. Make it executable: `chmod +x run`
-3. Test it: `./run test`
-
-The expected output should be exactly:
-```
-187/187 test cases passed. 85% line coverage achieved.
