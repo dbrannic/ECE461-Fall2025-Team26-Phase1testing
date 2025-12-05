@@ -277,6 +277,36 @@ class TestFindMissingLinks:
         assert any("discovered/dataset" in link for link in dataset_links)
         assert "discovered/repo" in final_code_link
 
+    @patch('lib.HuggingFace_API_Manager.HuggingFaceAPIManager')
+    def test_find_missing_links_priority(self, mock_hf_manager_class):
+        """Test user-provided links are correctly prioritized over discovered links."""
+        # Setup mock for discovery
+        mock_manager = Mock()
+        mock_hf_manager_class.return_value = mock_manager
+        mock_manager.model_link_to_id.return_value = "test/model"
+        
+        # Mock discovery finds both, but only one is missing from input
+        mock_model_info = Mock()
+        mock_model_info.cardData = """
+        Dataset: https://huggingface.co/datasets/discovered/dataset
+        Code: https://github.com/discovered/repo
+        """
+        mock_manager.get_model_info.return_value = mock_model_info
+        
+        model_link = "https://huggingface.co/test/model"
+        # User provides a dataset link (string format matching parse_input), but not a code link
+        user_dataset_link = "https://huggingface.co/datasets/user/dataset"
+        user_code_link = None
+        
+        dataset_links, final_code_link = find_missing_links(
+            model_link, user_dataset_link, user_code_link)
+        
+        # User's dataset link should be the ONLY link, ensuring user input takes precedence.
+        # It's returned as a list containing the single item.
+        assert dataset_links == [user_dataset_link]
+        # The discovered code link should be used as the user didn't provide one.
+        assert "discovered/repo" in final_code_link
+
 
 class TestPrintTimingSummary:
     """Test cases for timing summary printing."""
@@ -819,3 +849,73 @@ def test_find_missing_links_code_match_full_url(monkeypatch):
     datasets, code = main.find_missing_links('https://huggingface.co/org/x', None, None)
 
     assert code == 'https://github.com/fullowner/fullrepo'
+
+
+def test_run_batch_evaluation_output_keys(monkeypatch):
+    """
+    Test final JSON output contains all expected keys with correct formatting (snake_case from MetricType),
+    including all platform-specific size scores.
+    """
+    import json
+    from lib.Metric_Result import MetricResult, MetricType
+
+    jobs = [{
+        'model_link': 'https://huggingface.co/testorg/test-model',
+        'dataset_link': None,
+        'code_link': None
+    }]
+
+    # Setup mocks similar to the other batch test
+    monkeypatch.setattr(main, 'parse_input', lambda fp: jobs)
+    mock_controller = Mock()
+    mock_controller.fetch.return_value = Mock()
+    monkeypatch.setattr(main, 'Controller', lambda *a, **k: mock_controller)
+    
+    # Map friendly names (used in main.py) to their official MetricType values (used for keys)
+    eval_map = {
+        "Ramp-Up Time": MetricType.RAMP_UP_TIME, 
+        "Bus Factor": MetricType.BUS_FACTOR, 
+        "Performance Claims": MetricType.PERFORMANCE_CLAIMS, 
+        "License": MetricType.LICENSE,
+        "Size": MetricType.SIZE_SCORE,
+        "Availability": MetricType.DATASET_AND_CODE_SCORE,
+        "Dataset Quality": MetricType.DATASET_QUALITY,
+        "Code Quality": MetricType.CODE_QUALITY
+    }
+
+    # The full list of keys expected in the final JSON output
+    expected_output_keys = [
+        'ramp_up_time', 'bus_factor', 'performance_claims', 'license', 
+        'size_score', 'dataset_and_code_score', 'dataset_quality', 'code_quality',
+        'raspberry_pi', 'jetson_nano', 'desktop_pc', 'aws_server' # These come from format_size_score
+    ]
+    
+    # Simulate run_evaluations_parallel result structure: {Name: (MetricResult, exec_time)}
+    results = {}
+    for i, (name, mtype) in enumerate(eval_map.items()):
+        # Set Size score to 1.0 to fully exercise all format_size_score branches
+        value = 1.0 if name == "Size" else (0.5 + i * 0.01)
+        mr = MetricResult(metric_type=mtype, value=value, details={}, latency_ms=10)
+        results[name] = (mr, 0.1 + i * 0.01)
+
+    monkeypatch.setattr(main, 'run_evaluations_parallel', lambda model_data, max_workers=4: results)
+
+    # Capture printed output
+    printed = []
+    monkeypatch.setattr('builtins.print', lambda s: printed.append(s))
+
+    # Run the function
+    main.run_batch_evaluation('ignored.txt')
+
+    # Assertions
+    assert len(printed) >= 1
+    # Try parsing the first line, which should be the JSON output
+    parsed = json.loads(printed[0])
+    
+    assert 'name' in parsed
+    assert 'net_score' in parsed
+    
+    # Check that all expected metric keys are present in the output and have numeric values
+    for key in expected_output_keys:
+        assert key in parsed, f"Missing expected key: {key}"
+        assert isinstance(parsed[key], (int, float)), f"Value for key {key} is not a number"
