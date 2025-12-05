@@ -48,6 +48,46 @@ class TestModelManager:
             # Skip if class has different interface
             pass
 
+    def test_manager_models_full_data_population(self):
+        """Test ModelManager property setting and retrieval for all data types."""
+        try:
+            manager = ModelManager()
+            
+            # Mock data objects
+            mock_info = Mock(id="test/model")
+            mock_card = "README content"
+            mock_dataset_info_1 = Mock(id="ds1")
+            mock_repo_metadata = {"stars": 100, "owner": {"login": "test"}, "name": "repo"}
+            mock_repo_contents = [{"name": "file.py", "type": "file"}]
+            mock_contributors = [{"login": "user1"}]
+            mock_dataset_infos = {"ds1": mock_dataset_info_1}
+
+            # Set data using setters (if they exist, as implied by other controller tests)
+            if hasattr(manager, 'set_model_info'):
+                manager.set_model_info(mock_info)
+            if hasattr(manager, 'set_model_card'):
+                manager.set_model_card(mock_card)
+            if hasattr(manager, 'set_dataset_info'):
+                # Simulate the controller logic
+                manager.dataset_ids = ["ds1"]
+                manager.dataset_infos = mock_dataset_infos
+            if hasattr(manager, 'set_repo_metadata'):
+                manager.set_repo_metadata(mock_repo_metadata)
+                manager.set_repo_contents(mock_repo_contents)
+                manager.set_repo_contributors(mock_contributors)
+
+            # Assert retrieval of key properties
+            assert manager.id == "test/model"
+            assert manager.info == mock_info
+            assert manager.card == mock_card
+            assert len(manager.dataset_ids) == 1
+            assert manager.repo_metadata["stars"] == 100
+            assert len(manager.repo_contents) == 1
+            assert len(manager.repo_contributors) == 1
+            
+        except (ImportError, AttributeError, TypeError):
+            pass
+
     def test_manager_models_validation(self):
         """Test ModelManager data validation."""
         try:
@@ -69,6 +109,22 @@ class TestModelManager:
 
 class TestModelDataIntegration:
     """Integration tests for model data handling."""
+
+    def test_model_data_initialization(self):
+        """Test explicit initialization of all Model fields."""
+        model = Model(
+            model_link="test_model_link",
+            dataset_links=["ds_link"],
+            code_link="test_code_link",
+            model_description="Test model",
+            dataset_descriptions=["Test dataset"],
+            code_description="Test code"
+        )
+        assert model.model_link == "test_model_link"
+        assert model.dataset_links == ["ds_link"]
+        assert model.code_link == "test_code_link"
+        assert model.model_description == "Test model"
+        assert model.code_description == "Test code"
 
     def test_model_data_flow(self):
         """Test data flow between model classes."""

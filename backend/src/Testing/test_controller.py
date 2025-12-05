@@ -217,3 +217,54 @@ class TestController:
         # GitHub data (may be empty if rate limited)
         assert isinstance(result.repo_metadata, dict)
         assert isinstance(result.repo_contents, list)
+
+    @patch('Models.Model.HuggingFaceAPIManager')
+    @patch('Models.Model.GitHubAPIManager')
+    def test_fetch_with_linked_resource_failure(self, mock_github_api_class, mock_hf_api_class):
+        """Test fetch when a linked resource (dataset/repo) fails to fetch."""
+        
+        # 1. Mock HuggingFace API Manager (HF)
+        mock_hf_instance = Mock()
+        mock_hf_api_class.return_value = mock_hf_instance
+        
+        # Model info success (gpt2 exists)
+        mock_model_info = Mock(id="gpt2", cardData="...")
+        mock_hf_instance.model_link_to_id.return_value = "gpt2"
+        mock_hf_instance.get_model_info.return_value = mock_model_info
+        
+        # Dataset info fetch failure (to test error handling)
+        # Mock HF manager to return success for the first dataset link, but then fail to get the info for it.
+        mock_hf_instance.dataset_link_to_id.return_value = "squad"
+        mock_hf_instance.get_dataset_info.side_effect = Exception("Dataset API error")
+
+        # 2. Mock GitHub API Manager (GH)
+        mock_github_instance = Mock()
+        mock_github_api_class.return_value = mock_github_instance
+        
+        # Repo info failure (to test graceful skip)
+        mock_github_instance.code_link_to_repo.return_value = ("test", "repo")
+        mock_github_instance.get_repo_info.side_effect = Exception("GitHub repo info error")
+        
+        controller = Controller()
+        
+        model_link = "https://huggingface.co/gpt2"
+        # We provide a valid dataset link
+        dataset_links = ["https://huggingface.co/datasets/squad"]
+        code_link = "https://github.com/test/repo"
+        
+        result = controller.fetch(model_link, dataset_links, code_link)
+        
+        # Assert Model is fetched (success)
+        assert isinstance(result, ModelManager)
+        assert result.id == "gpt2"
+        
+        # Assert Dataset failure handling:
+        # The ID is derived, but the info fetch fails, so the final info map should be empty.
+        assert len(result.dataset_ids) == 1
+        assert 'squad' in result.dataset_ids
+        assert len(result.dataset_infos) == 0 # Info fetch failed and was skipped
+        
+        # Assert GitHub failure handling:
+        assert result.repo_metadata == {} # GitHub API failed, so metadata is empty
+        assert result.repo_contents == []
+        assert result.repo_contributors == []
