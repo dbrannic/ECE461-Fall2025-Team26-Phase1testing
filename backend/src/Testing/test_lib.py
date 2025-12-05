@@ -282,8 +282,17 @@ class TestGitHubAPIManager:
         try:
             manager = GitHubAPIManager()
             # Should handle 404 gracefully
-            repo_info = manager.get_repo_info("nonexistent/repo")
-            assert repo_info is None or isinstance(repo_info, dict)
+            # Note: The implementation in Github_API_Manager.py likely raises if no token is set, 
+            # so we'll test the error propagation path here.
+            try:
+                manager.get_repo_info("nonexistent", "repo")
+            except Exception:
+                pass # Expected exception when token is missing/api fails
+            
+            # Re-mock with token to test 404 handler path
+            manager_with_token = GitHubAPIManager(token="fake")
+            repo_info = manager_with_token.get_repo_info("nonexistent", "repo")
+            assert repo_info is None # API returns None on failure if it handles it gracefully
         except (ImportError, AttributeError, Exception):
             pass
 
@@ -297,6 +306,8 @@ class TestGitHubAPIManager:
                 ("https://github.com/owner/repo", ("owner", "repo")),
                 ("https://github.com/owner/repo.git", ("owner", "repo")),
                 ("https://github.com/openai/gpt-2", ("openai", "gpt-2")),
+                # Trailing slash
+                ("https://github.com/owner/repo/", ("owner", "repo")),
             ]
             
             for url, expected in test_cases:
@@ -310,6 +321,13 @@ class TestGitHubAPIManager:
                 assert False, "Should raise ValueError for invalid URL"
             except ValueError:
                 pass  # Expected
+            
+            # Test short path (only two segments after github.com)
+            try:
+                manager.code_link_to_repo("https://github.com/owner")
+                assert False, "Should raise ValueError for too short URL"
+            except ValueError:
+                pass # Expected
         except (ImportError, AttributeError):
             pass
 
@@ -433,6 +451,9 @@ class TestHuggingFaceAPIManager:
                 ("https://huggingface.co/gpt2", "gpt2"),
                 ("https://huggingface.co/distilbert-base-uncased",
                  "distilbert-base-uncased"),
+                # With trailing slash
+                ("https://huggingface.co/microsoft/DialoGPT-medium/",
+                 "microsoft/DialoGPT-medium"),
             ]
             
             for link, expected_id in test_cases:
@@ -440,12 +461,20 @@ class TestHuggingFaceAPIManager:
                 assert result == expected_id, \
                     f"Expected {expected_id}, got {result} for {link}"
             
-            # Test invalid link
+            # Test invalid link (empty path)
             try:
                 manager.model_link_to_id("https://huggingface.co/")
                 assert False, "Should raise ValueError for invalid link"
             except ValueError:
                 pass  # Expected
+            
+            # Test invalid link (not an HF URL)
+            try:
+                manager.model_link_to_id("https://example.com/model")
+                assert False, "Should raise ValueError for invalid link"
+            except ValueError:
+                pass # Expected
+
         except (ImportError, AttributeError):
             pass
 
@@ -456,11 +485,14 @@ class TestHuggingFaceAPIManager:
             
             # Test both formats: with org and without org
             test_cases = [
-                # With organization prefix
+                # Simple/default format
                 ("https://huggingface.co/datasets/squad", "squad"),
                 ("https://huggingface.co/datasets/glue", "glue"),
-                # Could have org prefix format too
+                # With organization prefix
                 ("https://huggingface.co/datasets/huggingface/squad",
+                 "huggingface/squad"),
+                # With trailing slash
+                ("https://huggingface.co/datasets/huggingface/squad/",
                  "huggingface/squad"),
             ]
             
@@ -469,12 +501,20 @@ class TestHuggingFaceAPIManager:
                 assert result == expected_id, \
                     f"Expected {expected_id}, got {result} for {link}"
             
-            # Test invalid link
+            # Test invalid link (empty path)
             try:
                 manager.dataset_link_to_id("https://huggingface.co/datasets/")
                 assert False, "Should raise ValueError for invalid link"
             except ValueError:
                 pass  # Expected
+            
+            # Test invalid link (not an HF dataset URL)
+            try:
+                manager.dataset_link_to_id("https://huggingface.co/models/")
+                assert False, "Should raise ValueError for invalid link"
+            except ValueError:
+                pass # Expected
+
         except (ImportError, AttributeError):
             pass
 

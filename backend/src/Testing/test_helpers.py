@@ -107,6 +107,12 @@ class TestISOParser:
             # Should return None due to exception handling
             assert result is None
 
+    def test_parse_iso8601_unparseable_date_time_value(self):
+        """Test parsing a string that matches the regex but is an impossible date."""
+        # This string will be correctly formatted but datetime.fromisoformat will fail
+        result = _parse_iso8601("2023-04-31T00:00:00Z")
+        assert result is None
+    
     def test_parse_iso8601_none_input(self):
         """Test parsing None value - should raise AttributeError."""
         try:
