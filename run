@@ -69,64 +69,83 @@ run_tests() {
         exit 1
     fi
     
-    # Run pytest and capture ALL output
+    # Run pytest and capture ALL output (stdout+stderr)
     pytest_output=$($PYTHON_CMD -m pytest backend/src/Testing/ \
         --cov=backend/src \
         --cov-report=term \
         --tb=line \
-        -v 2>&1)
-    
+        -q 2>&1)
+
     # Store exit code
     test_exit_code=$?
-    
-    # Print pytest output to stderr (for human debugging)
+
+    # Print pytest output to stderr for debugging (autograder reads only stdout)
     echo "$pytest_output" >&2
-    
+
     # === PARSE TEST COUNTS ===
     passed=0
     failed=0
-    
-    # Look for: "187 passed in 2.34s" or "150 passed, 2 failed in 1.23s"
+    errors=0
+    total=0
+
+    # Prefer the concise summary patterns
     if echo "$pytest_output" | grep -qE "[0-9]+ passed"; then
-        passed=$(echo "$pytest_output" | grep -oE "[0-9]+ passed" | head -1 | grep -oE "[0-9]+")
+        passed=$(echo "$pytest_output" | grep -oE "[0-9]+ passed" | tail -1 | grep -oE "[0-9]+")
     fi
-    
     if echo "$pytest_output" | grep -qE "[0-9]+ failed"; then
-        failed=$(echo "$pytest_output" | grep -oE "[0-9]+ failed" | head -1 | grep -oE "[0-9]+")
+        failed=$(echo "$pytest_output" | grep -oE "[0-9]+ failed" | tail -1 | grep -oE "[0-9]+")
     fi
-    
-    total=$((passed + failed))
-    
-    # Fallback: count PASSED/FAILED markers
-    if [ $total -eq 0 ]; then
-        passed=$(echo "$pytest_output" | grep -c "PASSED" || echo "0")
-        failed=$(echo "$pytest_output" | grep -c "FAILED" || echo "0")
-        total=$((passed + failed))
+    if echo "$pytest_output" | grep -qE "[0-9]+ error"; then
+        errors=$(echo "$pytest_output" | grep -oE "[0-9]+ error" | tail -1 | grep -oE "[0-9]+")
     fi
-    
-    # === PARSE COVERAGE ===
-    coverage=0
-    
-    # Look for TOTAL line: "TOTAL      1234    567    46%"
-    if echo "$pytest_output" | grep -q "^TOTAL"; then
-        coverage=$(echo "$pytest_output" | grep "^TOTAL" | grep -oE "[0-9]+%" | tail -1 | tr -d '%')
+
+    # Try to pick up the 'collected N items' line if present
+    if echo "$pytest_output" | grep -qE "collected [0-9]+"; then
+        collected=$(echo "$pytest_output" | grep -oE "collected [0-9]+" | tail -1 | grep -oE "[0-9]+")
+        # If we didn't get per-result numbers, assume collected == total
+        if [ -z "$passed" ] || [ "$passed" -eq 0 ]; then
+            passed=${passed:-0}
+        fi
+        total=$((collected))
     fi
-    
-    # Fallback: try with flexible whitespace
-    if [ -z "$coverage" ] || [ "$coverage" -eq 0 ]; then
-        coverage=$(echo "$pytest_output" | grep "TOTAL" | grep -oE "[0-9]+%\s*$" | grep -oE "[0-9]+" | head -1)
+
+    # Compute total from parsed numbers if not set by collected
+    if [ -z "$total" ] || [ "$total" -eq 0 ]; then
+        passed=${passed:-0}
+        failed=${failed:-0}
+        errors=${errors:-0}
+        total=$((passed + failed + errors))
+    else
+        # we have a collected count; if passed is missing, derive it
+        if [ "$passed" -eq 0 ] && [ $total -gt 0 ]; then
+            passed=$((total - failed - errors))
+        fi
     fi
-    
-    # Ensure valid defaults
+
+    # Final safety defaults
     passed=${passed:-0}
     total=${total:-0}
+
+    # === PARSE COVERAGE ===
+    coverage=0
+    # Look for lines with a percent value (prefer the last % in output)
+    cov_candidate=$(echo "$pytest_output" | grep -oE "[0-9]+%" | tail -1 | tr -d '%') || true
+    if [ -n "$cov_candidate" ]; then
+        coverage=$cov_candidate
+    fi
+
     coverage=${coverage:-0}
-    
+
+    # Ensure numeric defaults
+    if [ -z "$passed" ]; then passed=0; fi
+    if [ -z "$total" ]; then total=0; fi
+    if [ -z "$coverage" ]; then coverage=0; fi
+
     # === CRITICAL: OUTPUT TO STDOUT IN EXACT FORMAT ===
-    # This is what the autograder parses
+    # The autograder parses this single stdout line
     echo "${passed}/${total} test cases passed. ${coverage}% line coverage achieved."
-    
-    # Exit with pytest's exit code
+
+    # Exit with pytest's exit code so CI/test harness can see failures
     exit $test_exit_code
 }
 
