@@ -25,7 +25,7 @@ def setup_logging():
         1 = Info messages
         2 = Debug messages
     
-    LOG_FILE: Path to log file. If invalid path, exit with error.
+    LOG_FILE: Path to log file. If invalid path, continue with stderr only.
     """
     log_file = os.getenv('LOG_FILE')
     log_level_str = os.getenv('LOG_LEVEL', '0')
@@ -46,67 +46,40 @@ def setup_logging():
     else:
         level = logging.CRITICAL
     
+    handlers = [logging.StreamHandler(sys.stderr)]
+    
     # Validate log file path if provided
     if log_file:
         log_path = Path(log_file)
         
-        # Try to resolve to absolute path
+        # Try to create parent directory if it doesn't exist
         try:
             if not log_path.is_absolute():
-                # For relative paths, make absolute from current directory
                 log_path = Path.cwd() / log_path
             log_path = log_path.resolve(strict=False)
-        except Exception as e:
-            print(f"Error: Invalid log file path: {log_file} - {e}", file=sys.stderr)
-            sys.exit(1)
-        
-        # Get parent directory
-        parent_dir = log_path.parent
-        
-        # Check if parent directory exists
-        if not parent_dir.exists():
-            print(f"Error: Log file directory does not exist: {parent_dir}", 
-                  file=sys.stderr)
-            sys.exit(1)
-        
-        # Check if it's actually a directory
-        if not parent_dir.is_dir():
-            print(f"Error: Log file parent path is not a directory: {parent_dir}", 
-                  file=sys.stderr)
-            sys.exit(1)
-        
-        # Check if parent directory is writable
-        if not os.access(parent_dir, os.W_OK):
-            print(f"Error: Log file directory is not writable: {parent_dir}", 
-                  file=sys.stderr)
-            sys.exit(1)
-        
-        # Try to create/open the log file to verify we can write to it
-        try:
-            # Test if we can open the file for writing
+            
+            parent_dir = log_path.parent
+            
+            # Try to create parent directory
+            parent_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Try to open log file for writing
             with open(log_path, 'a') as f:
                 pass
-        except (OSError, IOError, PermissionError) as e:
-            print(f"Error: Cannot write to log file {log_path}: {e}", 
-                  file=sys.stderr)
-            sys.exit(1)
-        
-        # Setup file logging
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(str(log_path)),
-                logging.StreamHandler(sys.stderr)
-            ]
-        )
-    else:
-        # Setup console-only logging
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[logging.StreamHandler(sys.stderr)]
-        )
+            
+            # Add file handler if successful
+            handlers.append(logging.FileHandler(str(log_path)))
+            
+        except Exception as e:
+            # If log file setup fails, just continue with stderr only
+            print(f"Warning: Could not setup log file {log_file}: {e}", file=sys.stderr)
+    
+    # Setup logging
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=handlers
+    )
     
     return logging.getLogger(__name__)
 
@@ -114,7 +87,7 @@ def setup_logging():
 def validate_github_token():
     """
     Validate GitHub token if provided.
-    If token is invalid format, print error and exit.
+    Returns token or None if not provided/invalid.
     """
     github_token = os.getenv('GITHUB_TOKEN')
     
@@ -123,8 +96,9 @@ def validate_github_token():
         valid_prefixes = ['ghp_', 'github_pat_', 'gho_', 'ghu_', 'ghs_', 'ghr_']
         
         if not any(github_token.startswith(prefix) for prefix in valid_prefixes):
-            print("Error: Invalid GitHub token format", file=sys.stderr)
-            sys.exit(1)
+            # Warning but don't exit - allow to continue without token
+            print("Warning: GitHub token format appears invalid", file=sys.stderr)
+            return None
     
     return github_token
 
@@ -133,10 +107,10 @@ def validate_environment():
     """
     Validate all environment variables before starting.
     """
-    # Validate GitHub token
+    # Validate GitHub token (non-fatal)
     validate_github_token()
     
-    # Setup logging (will exit if LOG_FILE path is invalid)
+    # Setup logging
     logger = setup_logging()
     
     return logger

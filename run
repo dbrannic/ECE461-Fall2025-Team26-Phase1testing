@@ -69,37 +69,55 @@ run_tests() {
         exit 1
     fi
     
-    # Run pytest with coverage to a temporary file
+    # Run pytest with coverage
     temp_output=$(mktemp)
+    
+    # Run tests and capture output
     $PYTHON_CMD -m pytest backend/src/Testing/ \
         --cov=backend/src \
-        --cov-report=term-missing \
+        --cov-report=term \
         --tb=short \
-        -q 2>&1 | tee "$temp_output" >&2
+        -v 2>&1 | tee "$temp_output" >&2
     
     test_exit_code=${PIPESTATUS[0]}
     
-    # Parse test results
+    # Parse test results more robustly
     passed_tests=0
+    failed_tests=0
     total_tests=0
-    
-    # Look for pytest summary line like "187 passed in 2.34s"
-    if grep -E "[0-9]+ passed" "$temp_output" > /dev/null; then
-        passed_tests=$(grep -oE "[0-9]+ passed" "$temp_output" | grep -oE "[0-9]+" | head -1)
-    fi
-    
-    if grep -E "[0-9]+ failed" "$temp_output" > /dev/null; then
-        failed_tests=$(grep -oE "[0-9]+ failed" "$temp_output" | grep -oE "[0-9]+" | head -1)
-        total_tests=$((passed_tests + failed_tests))
-    else
-        total_tests=$passed_tests
-    fi
-    
-    # Extract coverage percentage from the TOTAL line
     coverage_percentage=0
-    if grep "TOTAL" "$temp_output" > /dev/null; then
-        coverage_percentage=$(grep "TOTAL" "$temp_output" | grep -oE "[0-9]+%" | grep -oE "[0-9]+" | tail -1)
+    
+    # Extract passed tests
+    if grep -oE "[0-9]+ passed" "$temp_output" > /dev/null; then
+        passed_tests=$(grep -oE "[0-9]+ passed" "$temp_output" | head -1 | grep -oE "[0-9]+")
     fi
+    
+    # Extract failed tests
+    if grep -oE "[0-9]+ failed" "$temp_output" > /dev/null; then
+        failed_tests=$(grep -oE "[0-9]+ failed" "$temp_output" | head -1 | grep -oE "[0-9]+")
+    fi
+    
+    # Calculate total
+    total_tests=$((passed_tests + failed_tests))
+    
+    # If no tests found, try to count from verbose output
+    if [ $total_tests -eq 0 ]; then
+        passed_tests=$(grep -c "PASSED" "$temp_output" || echo "0")
+        failed_tests=$(grep -c "FAILED" "$temp_output" || echo "0")
+        total_tests=$((passed_tests + failed_tests))
+    fi
+    
+    # Extract coverage from TOTAL line (last percentage on the TOTAL line)
+    if grep "TOTAL" "$temp_output" > /dev/null; then
+        # Get the TOTAL line and extract the percentage
+        coverage_line=$(grep "TOTAL" "$temp_output" | tail -1)
+        coverage_percentage=$(echo "$coverage_line" | grep -oE "[0-9]+%" | tail -1 | grep -oE "[0-9]+")
+    fi
+    
+    # Ensure we have valid numbers
+    passed_tests=${passed_tests:-0}
+    total_tests=${total_tests:-0}
+    coverage_percentage=${coverage_percentage:-0}
     
     # Clean up temp file
     rm -f "$temp_output"
@@ -108,11 +126,7 @@ run_tests() {
     echo "${passed_tests}/${total_tests} test cases passed. ${coverage_percentage}% line coverage achieved."
     
     # Exit with appropriate code
-    if [ $test_exit_code -eq 0 ]; then
-        exit 0
-    else
-        exit 1
-    fi
+    exit $test_exit_code
 }
 
 # Function to run evaluation on URL file

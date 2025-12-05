@@ -35,11 +35,16 @@ class HuggingFaceAPIManager:
     @staticmethod
     def dataset_link_to_id(dataset_link: str) -> str:
         """Converts a Hugging Face dataset link to a dataset ID."""
-        match = re.search(
-            r"huggingface\.co/datasets/([^/]+/[^/]+)", dataset_link
-        )
+        # Try two-part format first (org/dataset)
+        match = re.search(r"huggingface\.co/datasets/([^/]+/[^/]+)", dataset_link)
         if match:
             return match.group(1)
+        
+        # Try one-part format (dataset only)
+        match = re.search(r"huggingface\.co/datasets/([^/\?]+)", dataset_link)
+        if match:
+            return match.group(1)
+        
         raise ValueError(f"Invalid dataset link: {dataset_link}")
 
     def get_model_info(self, model_id: str) -> ModelInfo:
