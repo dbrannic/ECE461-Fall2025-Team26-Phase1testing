@@ -1,200 +1,45 @@
 #!/bin/bash
 
-# ML Model Evaluation System - Run Script
-# Usage: ./run [install|test|URL_FILE]
-
-set -e  # Exit on any error
-
-# Function to install dependencies
 install_dependencies() {
-    echo "Installing ML Model Evaluation System dependencies..." >&2
-
-    # Check if Python is available
-    PYTHON_CMD=""
-    if command -v py &> /dev/null; then
-        PYTHON_CMD="py"
-        echo "Using Python command: py" >&2
-    elif command -v python3 &> /dev/null; then
-        PYTHON_CMD="python3"
-        echo "Using Python command: python3" >&2
-    elif command -v python &> /dev/null; then
-        PYTHON_CMD="python"
-        echo "Using Python command: python" >&2
-    else
-        echo "Error: Python is not installed or not in PATH" >&2
-        exit 1
-    fi
-
-    # Check if pip is available
-    if ! $PYTHON_CMD -m pip --version &> /dev/null; then
-        echo "Error: pip is not available. Please install pip first." >&2
-        exit 1
-    fi
-
-    # Install requirements
-    if [ -f "requirements.txt" ]; then
-        echo "Installing packages from requirements.txt..." >&2
-        
-        if $PYTHON_CMD -m pip install -r requirements.txt --user > /dev/null 2>&1; then
-            echo "✓ All dependencies installed successfully!" >&2
-            exit 0
-        else
-            echo "Error: Failed to install dependencies" >&2
-            exit 1
-        fi
-    else
-        echo "Error: requirements.txt not found" >&2
-        exit 1
-    fi
-}
-
-# Function to run tests
-run_tests() {
-    # Check if Python is available
-    PYTHON_CMD=""
-    if command -v py &> /dev/null; then
-        PYTHON_CMD="py"
-    elif command -v python3 &> /dev/null; then
-        PYTHON_CMD="python3"
-    elif command -v python &> /dev/null; then
-        PYTHON_CMD="python"
-    else
-        echo "Error: Python is not installed" >&2
-        exit 1
-    fi
-    
-    # Check if pytest is installed
-    if ! $PYTHON_CMD -m pytest --version &> /dev/null; then
-        echo "Error: pytest is not installed. Run './run install' first." >&2
-        exit 1
-    fi
-    
-    # Run pytest and capture ALL output
-    pytest_output=$($PYTHON_CMD -m pytest backend/src/Testing/ \
-        --cov=backend/src \
-        --cov-report=term \
-        --tb=line \
-        -v 2>&1)
-    
-    # Store exit code
-    test_exit_code=$?
-    
-    # Print pytest output to stderr (for human debugging)
-    echo "$pytest_output" >&2
-    
-    # === PARSE TEST COUNTS ===
-    passed=0
-    failed=0
-    
-    # Look for: "187 passed in 2.34s"
-    if echo "$pytest_output" | grep -qE "[0-9]+ passed"; then
-        passed=$(echo "$pytest_output" | grep -oE "[0-9]+ passed" | head -1 | grep -oE "[0-9]+")
-    fi
-    
-    if echo "$pytest_output" | grep -qE "[0-9]+ failed"; then
-        failed=$(echo "$pytest_output" | grep -oE "[0-9]+ failed" | head -1 | grep -oE "[0-9]+")
-    fi
-    
-    total=$((passed + failed))
-    
-    # Fallback: count PASSED/FAILED markers
-    if [ $total -eq 0 ]; then
-        passed=$(echo "$pytest_output" | grep -c "PASSED" || echo "0")
-        failed=$(echo "$pytest_output" | grep -c "FAILED" || echo "0")
-        total=$((passed + failed))
-    fi
-    
-    # === PARSE COVERAGE ===
-    coverage=0
-    
-    # Look for TOTAL line: "TOTAL      1234    567    46%"
-    if echo "$pytest_output" | grep -q "^TOTAL"; then
-        coverage=$(echo "$pytest_output" | grep "^TOTAL" | grep -oE "[0-9]+%" | tail -1 | tr -d '%')
-    fi
-    
-    # Fallback: try with flexible whitespace
-    if [ -z "$coverage" ] || [ "$coverage" -eq 0 ]; then
-        coverage=$(echo "$pytest_output" | grep "TOTAL" | grep -oE "[0-9]+%\s*$" | grep -oE "[0-9]+" | head -1)
-    fi
-    
-    # Ensure valid defaults
-    passed=${passed:-0}
-    total=${total:-0}
-    coverage=${coverage:-0}
-    
-    # === CRITICAL: OUTPUT TO STDOUT IN EXACT FORMAT ===
-    echo "${passed}/${total} test cases passed. ${coverage}% line coverage achieved."
-    
-    # Exit with pytest's exit code
-    exit $test_exit_code
-}
-
-# Function to run evaluation on URL file
-run_evaluation() {
-    local url_file="$1"
-    
-    # Check if file exists
-    if [ ! -f "$url_file" ]; then
-        echo "Error: URL file not found: $url_file" >&2
-        exit 1
-    fi
-    
-    # Check if Python is available
     PYTHON_CMD="python3"
-    if ! command -v python3 &> /dev/null; then
-        PYTHON_CMD="python"
-    fi
+    command -v python3 &>/dev/null || PYTHON_CMD="python"
+    $PYTHON_CMD -m pip install -r requirements.txt --user &>/dev/null
+    exit $?
+}
+
+run_tests() {
+    PYTHON_CMD="python3"
+    command -v python3 &>/dev/null || PYTHON_CMD="python"
     
-    if ! command -v $PYTHON_CMD &> /dev/null; then
-        echo "Error: Python is not installed" >&2
-        exit 1
-    fi
-    
-    # Run evaluation from backend directory
-    cd backend
-    $PYTHON_CMD src/main.py "$url_file"
+    output=$($PYTHON_CMD -m pytest backend/src/Testing/ --cov=backend/src --cov-report=term -v 2>&1)
     exit_code=$?
+    echo "$output" >&2
     
+    passed=$(echo "$output" | grep -oE "[0-9]+ passed" | head -1 | grep -oE "[0-9]+")
+    failed=$(echo "$output" | grep -oE "[0-9]+ failed" | head -1 | grep -oE "[0-9]+")
+    total=$((${passed:-0} + ${failed:-0}))
+    
+    [ $total -eq 0 ] && {
+        passed=$(echo "$output" | grep -c " PASSED")
+        failed=$(echo "$output" | grep -c " FAILED")
+        total=$((passed + failed))
+    }
+    
+    coverage=$(echo "$output" | grep "^TOTAL" | tail -1 | grep -oE "[0-9]+%" | tail -1 | tr -d '%')
+    
+    echo "${passed:-0}/${total:-0} test cases passed. ${coverage:-0}% line coverage achieved."
     exit $exit_code
 }
 
-# Function to show usage
-show_usage() {
-    echo "Usage: ./run [install|test|URL_FILE]" >&2
-    echo "" >&2
-    echo "Commands:" >&2
-    echo "  install     Install all required dependencies" >&2
-    echo "  test        Run the test suite" >&2
-    echo "  URL_FILE    Run evaluation on URLs in the specified file" >&2
+run_evaluation() {
+    PYTHON_CMD="python3"
+    command -v python3 &>/dev/null || PYTHON_CMD="python"
+    cd backend && $PYTHON_CMD src/main.py "$1"
+    exit $?
 }
 
-# Main script logic
-main() {
-    if [ $# -eq 0 ]; then
-        echo "Error: No command specified" >&2
-        show_usage
-        exit 1
-    fi
-    
-    local command="$1"
-    
-    case "$command" in
-        "install")
-            install_dependencies
-            ;;
-        "test")
-            run_tests
-            ;;
-        "-h"|"--help"|"help")
-            show_usage
-            exit 0
-            ;;
-        *)
-            # Assume it's a URL file
-            run_evaluation "$command"
-            ;;
-    esac
-}
-
-# Run main function
-main "$@"
+case "$1" in
+    install) install_dependencies ;;
+    test) run_tests ;;
+    *) run_evaluation "$1" ;;
+esac
