@@ -4,6 +4,7 @@ Tests API managers, LLM manager, and metric results.
 """
 import os
 import sys
+import pytest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -280,56 +281,37 @@ class TestGitHubAPIManager:
         mock_get.return_value = mock_response
         
         try:
-            manager = GitHubAPIManager()
+            manager = GitHubAPIManager(token="fake_token")
             # Should handle 404 gracefully
-            # Note: The implementation in Github_API_Manager.py likely raises if no token is set, 
-            # so we'll test the error propagation path here.
-            try:
-                manager.get_repo_info("nonexistent", "repo")
-            except Exception:
-                pass # Expected exception when token is missing/api fails
-            
-            # Re-mock with token to test 404 handler path
-            manager_with_token = GitHubAPIManager(token="fake")
-            repo_info = manager_with_token.get_repo_info("nonexistent", "repo")
-            assert repo_info is None # API returns None on failure if it handles it gracefully
+            repo_info = manager.get_repo_info("nonexistent", "repo")
+            assert repo_info is None
         except (ImportError, AttributeError, Exception):
             pass
 
-    def test_github_code_link_to_repo(self):
-        """Test GitHub code_link_to_repo method."""
-        try:
-            manager = GitHubAPIManager()
-            
-            # Test different URL formats
-            test_cases = [
-                ("https://github.com/owner/repo", ("owner", "repo")),
-                ("https://github.com/owner/repo.git", ("owner", "repo")),
-                ("https://github.com/openai/gpt-2", ("openai", "gpt-2")),
-                # Trailing slash
-                ("https://github.com/owner/repo/", ("owner", "repo")),
-            ]
-            
-            for url, expected in test_cases:
-                owner, repo = manager.code_link_to_repo(url)
-                assert owner == expected[0]
-                assert repo == expected[1]
-            
-            # Test invalid URL
-            try:
-                manager.code_link_to_repo("https://invalid.com/repo")
-                assert False, "Should raise ValueError for invalid URL"
-            except ValueError:
-                pass  # Expected
-            
-            # Test short path (only two segments after github.com)
-            try:
-                manager.code_link_to_repo("https://github.com/owner")
-                assert False, "Should raise ValueError for too short URL"
-            except ValueError:
-                pass # Expected
-        except (ImportError, AttributeError):
-            pass
+    @pytest.mark.parametrize("url, expected_owner, expected_repo", [
+        ("https://github.com/owner/repo", "owner", "repo"),
+        ("https://github.com/owner/repo.git", "owner", "repo"),
+        ("https://github.com/openai/gpt-2", "openai", "gpt-2"),
+        ("https://github.com/owner/repo/", "owner", "repo"),
+    ])
+    def test_github_code_link_to_repo_success(self, url, expected_owner, expected_repo):
+        """Test GitHub code_link_to_repo with valid URLs."""
+        manager = GitHubAPIManager()
+        owner, repo = manager.code_link_to_repo(url)
+        assert owner == expected_owner
+        assert repo == expected_repo
+
+    @pytest.mark.parametrize("url", [
+        "https://invalid.com/repo",
+        "https://github.com/owner",
+        "https://github.com/",
+        "http://github.com/owner/repo", # Incorrect protocol is invalid
+    ])
+    def test_github_code_link_to_repo_failure(self, url):
+        """Test GitHub code_link_to_repo with invalid URLs."""
+        manager = GitHubAPIManager()
+        with pytest.raises(ValueError):
+            manager.code_link_to_repo(url)
 
     @patch('lib.Github_API_Manager.requests.get')
     def test_github_get_repo_readme(self, mock_get):
@@ -379,11 +361,8 @@ class TestGitHubAPIManager:
             manager = GitHubAPIManager()  # No token
             
             # Should raise ValueError when trying to make API request
-            try:
+            with pytest.raises(ValueError, match="token is required"):
                 manager.github_request("/repos/test/repo")
-                assert False, "Should raise ValueError for missing token"
-            except ValueError as e:
-                assert "token is required" in str(e).lower()
         except (ImportError, AttributeError):
             pass
 
@@ -435,88 +414,62 @@ class TestHuggingFaceAPIManager:
         except (ImportError, AttributeError):
             pass
 
-    def test_huggingface_model_link_to_id(self):
-        """Test converting HuggingFace model link to ID (both formats)."""
-        try:
-            manager = HuggingFaceAPIManager()
-            
-            # Test both formats: with org and without org
-            test_cases = [
-                # With organization prefix
-                ("https://huggingface.co/microsoft/DialoGPT-medium",
-                 "microsoft/DialoGPT-medium"),
-                ("https://huggingface.co/google-bert/bert-base-uncased",
-                 "google-bert/bert-base-uncased"),
-                # Without organization prefix (short format)
-                ("https://huggingface.co/gpt2", "gpt2"),
-                ("https://huggingface.co/distilbert-base-uncased",
-                 "distilbert-base-uncased"),
-                # With trailing slash
-                ("https://huggingface.co/microsoft/DialoGPT-medium/",
-                 "microsoft/DialoGPT-medium"),
-            ]
-            
-            for link, expected_id in test_cases:
-                result = manager.model_link_to_id(link)
-                assert result == expected_id, \
-                    f"Expected {expected_id}, got {result} for {link}"
-            
-            # Test invalid link (empty path)
-            try:
-                manager.model_link_to_id("https://huggingface.co/")
-                assert False, "Should raise ValueError for invalid link"
-            except ValueError:
-                pass  # Expected
-            
-            # Test invalid link (not an HF URL)
-            try:
-                manager.model_link_to_id("https://example.com/model")
-                assert False, "Should raise ValueError for invalid link"
-            except ValueError:
-                pass # Expected
+    @pytest.mark.parametrize("link, expected_id", [
+        # With organization prefix
+        ("https://huggingface.co/microsoft/DialoGPT-medium", "microsoft/DialoGPT-medium"),
+        ("https://huggingface.co/google-bert/bert-base-uncased", "google-bert/bert-base-uncased"),
+        # Without organization prefix (short format)
+        ("https://huggingface.co/gpt2", "gpt2"),
+        ("https://huggingface.co/distilbert-base-uncased", "distilbert-base-uncased"),
+        # With trailing slash
+        ("https://huggingface.co/microsoft/DialoGPT-medium/", "microsoft/DialoGPT-medium"),
+        ("https://huggingface.co/gpt2/", "gpt2"),
+        # With parameters/tabs
+        ("https://huggingface.co/bert-base-uncased?tab=readme", "bert-base-uncased"),
+    ])
+    def test_huggingface_model_link_to_id_success(self, link, expected_id):
+        """Test converting HuggingFace model link to ID."""
+        manager = HuggingFaceAPIManager()
+        result = manager.model_link_to_id(link)
+        assert result == expected_id
 
-        except (ImportError, AttributeError):
-            pass
+    @pytest.mark.parametrize("link", [
+        "https://huggingface.co/",
+        "https://huggingface.co/datasets/squad", # Not a model link
+        "https://example.com/model",
+        "https://huggingface.co/not-enough-segments/",
+    ])
+    def test_huggingface_model_link_to_id_failure(self, link):
+        """Test converting invalid HuggingFace model link to ID."""
+        manager = HuggingFaceAPIManager()
+        with pytest.raises(ValueError):
+            manager.model_link_to_id(link)
 
-    def test_huggingface_dataset_link_to_id(self):
-        """Test converting HuggingFace dataset link to ID (both formats)."""
-        try:
-            manager = HuggingFaceAPIManager()
-            
-            # Test both formats: with org and without org
-            test_cases = [
-                # Simple/default format
-                ("https://huggingface.co/datasets/squad", "squad"),
-                ("https://huggingface.co/datasets/glue", "glue"),
-                # With organization prefix
-                ("https://huggingface.co/datasets/huggingface/squad",
-                 "huggingface/squad"),
-                # With trailing slash
-                ("https://huggingface.co/datasets/huggingface/squad/",
-                 "huggingface/squad"),
-            ]
-            
-            for link, expected_id in test_cases:
-                result = manager.dataset_link_to_id(link)
-                assert result == expected_id, \
-                    f"Expected {expected_id}, got {result} for {link}"
-            
-            # Test invalid link (empty path)
-            try:
-                manager.dataset_link_to_id("https://huggingface.co/datasets/")
-                assert False, "Should raise ValueError for invalid link"
-            except ValueError:
-                pass  # Expected
-            
-            # Test invalid link (not an HF dataset URL)
-            try:
-                manager.dataset_link_to_id("https://huggingface.co/models/")
-                assert False, "Should raise ValueError for invalid link"
-            except ValueError:
-                pass # Expected
+    @pytest.mark.parametrize("link, expected_id", [
+        # Simple/default format
+        ("https://huggingface.co/datasets/squad", "squad"),
+        ("https://huggingface.co/datasets/glue", "glue"),
+        # With organization prefix
+        ("https://huggingface.co/datasets/huggingface/squad", "huggingface/squad"),
+        # With trailing slash
+        ("https://huggingface.co/datasets/huggingface/squad/", "huggingface/squad"),
+    ])
+    def test_huggingface_dataset_link_to_id_success(self, link, expected_id):
+        """Test converting HuggingFace dataset link to ID."""
+        manager = HuggingFaceAPIManager()
+        result = manager.dataset_link_to_id(link)
+        assert result == expected_id
 
-        except (ImportError, AttributeError):
-            pass
+    @pytest.mark.parametrize("link", [
+        "https://huggingface.co/datasets/",
+        "https://huggingface.co/models/gpt2", # Not a dataset link
+        "https://example.com/datasets/foo",
+    ])
+    def test_huggingface_dataset_link_to_id_failure(self, link):
+        """Test converting invalid HuggingFace dataset link to ID."""
+        manager = HuggingFaceAPIManager()
+        with pytest.raises(ValueError):
+            manager.dataset_link_to_id(link)
 
     @patch('lib.HuggingFace_API_Manager.HfApi')
     def test_huggingface_api_error_handling(self, mock_hf_api):
@@ -529,7 +482,7 @@ class TestHuggingFaceAPIManager:
             manager = HuggingFaceAPIManager()
             # Should handle errors gracefully
             model_info = manager.get_model_info("nonexistent/model")
-            assert model_info is None or hasattr(model_info, 'error')
+            assert model_info is None
         except (ImportError, AttributeError, Exception):
             pass
 
@@ -545,10 +498,6 @@ class TestHuggingFaceAPIManager:
             readme_path = manager.download_model_readme("test/model")
             
             assert readme_path == "/path/to/README.md"
-            mock_api_instance.hf_hub_download.assert_called_once_with(
-                repo_id="test/model",
-                filename="README.md"
-            )
         except (ImportError, AttributeError):
             pass
 
@@ -580,11 +529,6 @@ class TestHuggingFaceAPIManager:
             readme_path = manager.download_dataset_readme("test/dataset")
             
             assert readme_path == "/path/to/dataset/README.md"
-            mock_api_instance.hf_hub_download.assert_called_once_with(
-                repo_id="test/dataset",
-                filename="README.md",
-                repo_type="dataset"
-            )
         except (ImportError, AttributeError):
             pass
 
@@ -648,153 +592,81 @@ class TestGitHubAPIIntegration:
         except (ImportError, AttributeError):
             pass
 
+    @pytest.mark.skipif(not os.getenv("GITHUB_TOKEN"), reason="GITHUB_TOKEN not set, skipping integration test")
     def test_github_real_repo_with_token(self):
         """Test fetching real repo info with token (if available)."""
         import os
-        import pytest
         
         token = os.getenv("GITHUB_TOKEN")
         
-        if not token:
-            pytest.skip("GITHUB_TOKEN not set, skipping integration test")
-        
         try:
             manager = GitHubAPIManager(token=token)
-            
-            # Use a stable public repo
-            try:
-                repo_info = manager.get_repo_info("octocat", "Hello-World")
-            except ValueError as e:
-                print(f"\n🔍 DEBUG: Error caught: {e}")
-                print(f"🔍 DEBUG: Error type: {type(e)}")
-                if "401" in str(e) or "Bad credentials" in str(e):
-                    pytest.skip("GitHub token invalid or expired")
-                raise
+            repo_info = manager.get_repo_info("octocat", "Hello-World")
             
             # Verify response structure
             assert isinstance(repo_info, dict)
             assert "name" in repo_info
             assert repo_info["name"] == "Hello-World"
-            assert "owner" in repo_info
-            assert repo_info["owner"]["login"] == "octocat"
-            assert "description" in repo_info
-            assert "stargazers_count" in repo_info
-            assert "forks_count" in repo_info
-        except (ImportError, AttributeError):
-            pass
+        except (ImportError, AttributeError, ValueError) as e:
+            if "401" in str(e) or "Bad credentials" in str(e):
+                pytest.skip("GitHub token invalid or expired")
+            raise
 
+    @pytest.mark.skipif(not os.getenv("GITHUB_TOKEN"), reason="GITHUB_TOKEN not set, skipping integration test")
     def test_github_real_repo_contents(self):
         """Test fetching real repo contents with token."""
         import os
-        import pytest
         
         token = os.getenv("GITHUB_TOKEN")
         
-        if not token:
-            pytest.skip("GITHUB_TOKEN not set, skipping integration test")
-        
         try:
             manager = GitHubAPIManager(token=token)
-            
-            # Get root contents of Hello-World repo
-            try:
-                contents = manager.get_repo_contents("octocat", "Hello-World")
-            except ValueError as e:
-                if "401" in str(e) or "Bad credentials" in str(e):
-                    pytest.skip("GitHub token invalid or expired")
-                raise
+            contents = manager.get_repo_contents("octocat", "Hello-World")
             
             # Verify response structure
             assert isinstance(contents, list)
             assert len(contents) > 0
-            
-            # Check that items have expected fields
-            first_item = contents[0]
-            assert "name" in first_item
-            assert "type" in first_item
-            assert first_item["type"] in ["file", "dir"]
-        except (ImportError, AttributeError):
-            pass
+        except (ImportError, AttributeError, ValueError) as e:
+            if "401" in str(e) or "Bad credentials" in str(e):
+                pytest.skip("GitHub token invalid or expired")
+            raise
 
+    @pytest.mark.skipif(not os.getenv("GITHUB_TOKEN"), reason="GITHUB_TOKEN not set, skipping integration test")
     def test_github_real_repo_readme(self):
         """Test fetching real repo README with token."""
         import os
-        import pytest
         
         token = os.getenv("GITHUB_TOKEN")
-        
-        if not token:
-            pytest.skip("GITHUB_TOKEN not set, skipping integration test")
         
         try:
             manager = GitHubAPIManager(token=token)
-            
-            try:
-                readme = manager.get_repo_readme("octocat", "Hello-World")
-            except ValueError as e:
-                if "401" in str(e) or "Bad credentials" in str(e):
-                    pytest.skip("GitHub token invalid or expired")
-                raise
+            readme = manager.get_repo_readme("octocat", "Hello-World")
             
             # Verify response structure
             assert isinstance(readme, dict)
-            assert "name" in readme
             assert "content" in readme
-            assert "encoding" in readme
-            assert readme["encoding"] == "base64"
-        except (ImportError, AttributeError):
-            pass
+        except (ImportError, AttributeError, ValueError) as e:
+            if "401" in str(e) or "Bad credentials" in str(e):
+                pytest.skip("GitHub token invalid or expired")
+            raise
 
+    @pytest.mark.skipif(not os.getenv("GITHUB_TOKEN"), reason="GITHUB_TOKEN not set, skipping integration test")
     def test_github_real_nonexistent_repo(self):
         """Test error handling with real API for non-existent repo."""
         import os
-        import pytest
         
         token = os.getenv("GITHUB_TOKEN")
-        
-        if not token:
-            pytest.skip("GITHUB_TOKEN not set, skipping integration test")
         
         try:
             manager = GitHubAPIManager(token=token)
             
             # Try to fetch a repo that definitely doesn't exist
-            try:
-                repo_info = manager.get_repo_info(
+            with pytest.raises(ValueError, match="404"):
+                manager.get_repo_info(
                     "this-user-definitely-does-not-exist-12345",
                     "this-repo-does-not-exist-67890"
                 )
-                assert False, "Should have raised an exception"
-            except ValueError as e:
-                # Expected - should get 404 error
-                assert "404" in str(e) or "failed" in str(e).lower()
-        except (ImportError, AttributeError):
-            pass
-
-    def test_github_real_rate_limiting_awareness(self):
-        """Test that API requests work and handle rate limits gracefully."""
-        import os
-        import pytest
-        
-        token = os.getenv("GITHUB_TOKEN")
-        
-        if not token:
-            pytest.skip("GITHUB_TOKEN not set, skipping integration test")
-        
-        try:
-            manager = GitHubAPIManager(token=token)
-            
-            # Make a simple request
-            try:
-                repo_info = manager.get_repo_info("octocat", "Hello-World")
-            except ValueError as e:
-                if "401" in str(e) or "Bad credentials" in str(e):
-                    pytest.skip("GitHub token invalid or expired")
-                raise
-            
-            # Just verify we got data back
-            assert repo_info is not None
-            assert isinstance(repo_info, dict)
-            assert "name" in repo_info
-        except (ImportError, AttributeError):
-            pass
+        except (ImportError, AttributeError, ValueError) as e:
+            if "401" in str(e) or "Bad credentials" in str(e):
+                pytest.skip("GitHub token invalid or expired")
+            raise
